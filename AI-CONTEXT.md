@@ -99,3 +99,10 @@
 **README CI 徽章**：配了 CI 才放徽章（自动更新）；没配 CI 不放假徽章。
 
 **失败案例**：2026-10-26 首次开源时漏建 CHANGELOG、README 留有 `<你的用户名>` 占位符、自检假阴性——次日返工补齐。
+
+## 打包/发产物注意（2026-10-26 教训）
+
+- **打 .app 的 zip 必须 `--keepParent`**：`cd <App所在目录> && ditto -c -k --keepParent App.app X.zip`
+  ——漏了会丢外层目录（解压只有 Contents/，用户没法拖进应用程序）。
+- **不要加 `--sequesterRsrc`**（App 无资源分叉时会引入 __MACOSX 垃圾目录）。
+- **上传 Release 前必须实际解压验证产物结构**；替换资产：先 DELETE 旧 asset 再传同名文件。
