@@ -74,7 +74,7 @@ enum Fw {
                 if let i = $0 as? Int { return "\(i)" }
                 return "?"
             }
-            return "[\(parts.joined(separator: ", "))(\(arr.count))]"
+            return "[\(parts.joined(separator: ", ")) (\(arr.count))]"
         }
         if let cf = v as? CFTypeRef { return "(CFType: \(CFGetTypeID(cf)))" }
         return "(\(type(of: v!)))"
@@ -104,7 +104,8 @@ enum Fw {
 
             var props: Unmanaged<CFMutableDictionary>? = nil
             guard IORegistryEntryCreateCFProperties(entry, &props, nil, 0) == kIOReturnSuccess,
-                  let p = props?.takeRetainedValue() as? [String: Any] else { return }
+                  let dict = props?.takeRetainedValue(),
+                  let p = dict as? [String: Any] else { return }
 
             let cls = (p["IOClass"] as? String) ?? "?"
             let nodeL = (node + " " + cls).lowercased()

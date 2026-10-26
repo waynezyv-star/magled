@@ -41,7 +41,8 @@ public enum LedSock {
 
         let ok = withUnsafePointer(to: &addr) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                Darwin.connect(fd, sp, socklen_t(MemoryLayout<sockaddr_un>.size))
+                // 与 helper bind 时保持一致：AF_UNIX 地址长度 = 2 + 路径长
+                Darwin.connect(fd, sp, socklen_t(2 + path.utf8.count))
             }
         }
         guard ok == 0 else { return nil }

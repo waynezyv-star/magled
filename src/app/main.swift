@@ -32,6 +32,8 @@ final class MagLEDController: NSObject, NSMenuDelegate {
     var current: UInt8 = 0
     var supported = false
     var helperUp = false
+    // SMC 访问串行队列：后台 refresh 与主线程写操作共用同一个 SMC.Client，需防并发
+    let smcQueue = DispatchQueue(label: "com.atstudio.magled.smc")
     var nightEnabled = false {
         didSet { UserDefaults.standard.set(nightEnabled, forKey: kNightPrefKey) }
     }
@@ -50,7 +52,8 @@ final class MagLEDController: NSObject, NSMenuDelegate {
         let night = UserDefaults.standard.bool(forKey: kNightPrefKey)
         nightEnabled = night
         let saved = UserDefaults.standard.object(forKey: kLastModeKey) as? String
-        if let s = saved, let v = UInt8(s, radix: 16), [0, 1, 3, 4].contains(v) {
+        // 白名单与 helper 的 kAllowed 对齐：0=系统 1=关 3=绿 4=橙 6=慢闪 7=快闪 0x19=闪后关
+        if let s = saved, let v = UInt8(s, radix: 16), [0, 1, 3, 4, 6, 7, 0x19].contains(v) {
             current = v
         }
 
@@ -117,7 +120,9 @@ final class MagLEDController: NSObject, NSMenuDelegate {
 
         updateLoginCheck()
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.tick()
+            // 用 refresh 而非裸 tick：同时更新 helperUp/supported，
+            // 避免唤醒后一次 ping 失败导致 helperUp 卡在 false、夜间计划彻底静默失效
+            self?.refresh()
         }
         tick()
         refresh()
@@ -139,32 +144,110 @@ final class MagLEDController: NSObject, NSMenuDelegate {
         if helperUp, let r = LedSock.send("get"), r.ok, let v = UInt8(r.payload, radix: 16) {
             return v
         }
-        if SMC.isLEDKeySupported() {
-            if sMC == nil { sMC = try? SMC.Client() }
-            if let c = sMC { return try? c.readByte(SMC.magSafeLEDKey) }
+        return smcReadLED()
+    }
+
+    /// 直接读当前灯态（不走 helper；串行执行防并发；读取失败说明连接失效，丢弃下次重连）
+    func smcReadLED() -> UInt8? {
+        smcQueue.sync {
+            if SMC.isLEDKeySupported() {
+                if sMC == nil { sMC = try? SMC.Client() }
+                if let c = sMC {
+                    if let v = try? c.readByte(SMC.magSafeLEDKey) { return v }
+                    // 读取失败：连接可能已失效（睡眠唤醒后常见）——丢弃，下次自动重连
+                    sMC = nil
+                }
+            }
+            return nil
         }
-        return nil
+    }
+
+    /// Mach-O 的代码/数据段内容（跳过头部页与 __LINKEDIT，排除代码签名差异）。
+    /// 安装时重新 ad-hoc 签名会改变头部加载命令与尾部签名 blob，但机器码逐字节不变。
+    private static func machCodeBody(_ data: Data) -> Data? {
+        guard data.count >= 32 else { return nil }
+        let magic = data.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        guard magic == 0xfeedfacf else { return nil }   // MH_MAGIC_64
+        let ncmds = data.subdata(in: 16..<20).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        var off = 32, headerEnd = 32, linkeditStart = data.count
+        for _ in 0..<ncmds {
+            guard off + 8 <= data.count else { return nil }
+            let cmd = data.subdata(in: off..<off+4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            let cmdsize = data.subdata(in: off+4..<off+8).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            guard cmdsize >= 8, off + Int(cmdsize) <= data.count else { return nil }
+            if cmd == 0x19 {  // LC_SEGMENT_64
+                let name = String(decoding: data.subdata(in: off+8..<off+24).prefix(while: { $0 != 0 }), as: UTF8.self)
+                if name == "__LINKEDIT" {
+                    let fileoff = data.subdata(in: off+40..<off+48).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+                    linkeditStart = min(linkeditStart, Int(fileoff))
+                }
+            }
+            off += Int(cmdsize)
+            headerEnd = off
+        }
+        let start = max(headerEnd, 4096)   // 头部页含随签名变化的 LC_CODE_SIGNATURE，不参与比较
+        guard start < linkeditStart else { return nil }
+        return data.subdata(in: start..<linkeditStart)
+    }
+
+    /// 已安装的守护是否比 App 自带版本旧（需要更新才会提示）
+    var daemonOutdated: Bool {
+        let installed = "/usr/local/lib/magled/magled-helper"
+        guard let res = Bundle.main.resourcePath else { return false }
+        let bundled = (res as NSString).appendingPathComponent("magled-helper")
+        guard let a = try? Data(contentsOf: URL(fileURLWithPath: installed)),
+              let b = try? Data(contentsOf: URL(fileURLWithPath: bundled)) else { return false }
+        guard let ba = Self.machCodeBody(a), let bb = Self.machCodeBody(b) else { return a != b }
+        return ba != bb
     }
 
     func writeCurrent(_ v: UInt8) -> Bool {
-        guard helperUp, let r = LedSock.send("set \(String(format: "%02x", v))"), r.ok else {
-            return false
+        guard helperUp else { return false }
+        let hex = String(format: "%02x", v)
+        if let r = LedSock.send("set \(hex)"), r.ok { return true }
+        // 旧版 helper 的回读校验有 bug（readByte 未设置 dataSize，macOS 27 上读到 0xff 桩值），
+        // 会误报 "ERR write-failed"——但写入本身是有效的。此时直接读回验证：
+        // 值已生效即视为成功。
+        Thread.sleep(forTimeInterval: 0.15)
+        guard let back = smcReadLED() else { return false }
+        if v == 0 {
+            // 系统模式（0x00）回读的是"当前生效颜色"（如满电绿=0x03），不可能等于 0：
+            // 读到任何合法值即视为生效。
+            return [0, 1, 3, 4, 6, 7, 0x19, 0xff].contains(back)
         }
-        return true
+        return back == v
     }
 
     func refresh() {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.helperUp = LedSock.helperRunning()
-            self.supported = SMC.isLEDKeySupported()
-            if let v = self.readCurrent() { self.current = v }
-            self.rebuildMenu()
-            if self.nightEnabled { self.tick() }
+            // I/O 全部放后台线程：socket ping/read 最长 5 秒超时，不能阻塞主线程（菜单栏 UI）
+            let up = LedSock.helperRunning()
+            // ACLC 键存在性不会在运行时段变化：一旦检测到支持就锁存，避免瞬时读取抖动误报"不支持"；
+            // 尚未确认支持时最多重试 3 次。
+            var sup = self.supported
+            if !sup {
+                for _ in 0..<3 {
+                    if sup { break }
+                    sup = SMC.isLEDKeySupported()
+                }
+            }
+            let v = self.readCurrent()
+            DispatchQueue.main.async {
+                self.helperUp = up
+                self.supported = sup
+                if let v = v {
+                    // macOS 27 上系统模式（0x00）回读为"当前生效颜色"（如满电=0x03）：
+                    // 用户选"跟随系统"时不要被回读覆盖，否则勾选会跳到颜色项上。
+                    if !(self.current == 0 && v != 0) { self.current = v }
+                }
+                self.rebuildMenu()
+                if self.nightEnabled { self.tick() }
+            }
         }
         refreshWorkItem?.cancel()
         refreshWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
     func rebuildMenu() {
@@ -208,7 +291,15 @@ final class MagLEDController: NSObject, NSMenuDelegate {
         }
         itemNight.state = nightEnabled ? .on : .off
         itemHelperStatus.title = helperUp ? "后台守护: 运行中 ✓" : "后台守护: 未安装"
-        itemInstall.isHidden = helperUp
+        // 守护在跑但二进制旧了 → 显示"更新"入口（点一次输一次密码，之后不再问）；
+        // 未安装 → 显示"安装"；已是最新 → 隐藏。
+        if daemonOutdated {
+            itemInstall.title = "更新后台守护（需要密码）"
+            itemInstall.isHidden = false
+        } else {
+            itemInstall.title = "安装后台守护（需要密码）"
+            itemInstall.isHidden = helperUp
+        }
         updateIcon()
     }
 
@@ -231,8 +322,7 @@ final class MagLEDController: NSObject, NSMenuDelegate {
     func applyMode(_ v: UInt8, title: String) {
         guard supported else { flash(title: "这台 Mac 没有 MagSafe 3 硬件") ; return }
         guard helperUp else {
-            flash(title: "后台守护未安装 — 请先安装（输入密码）")
-            installHelper()
+            flash(title: "后台守护未安装 — 点下方「安装后台守护」安装（仅需一次密码，之后不再询问）")
             return
         }
         current = v
@@ -376,13 +466,23 @@ final class MagLEDController: NSObject, NSMenuDelegate {
     func tick() {
         guard nightEnabled, supported, helperUp else { return }
         let shouldOff = inNight()
-        guard shouldOff != nightApplied else { return }
-        nightApplied = shouldOff
-        let v: UInt8 = shouldOff ? 1 : 0
-        if writeCurrent(v) {
-            current = v
-            rebuildMenu()
-            flash(title: shouldOff ? "夜间模式：灯已关闭" : "夜间结束：恢复系统")
+        if shouldOff != nightApplied {
+            // 状态切换：进入夜间 → 关灯；离开夜间 → 交还系统
+            nightApplied = shouldOff
+            let v: UInt8 = shouldOff ? 1 : 0
+            if writeCurrent(v) {
+                current = v
+                rebuildMenu()
+                flash(title: shouldOff ? "夜间模式：灯已关闭" : "夜间结束：恢复系统")
+            }
+        } else if shouldOff, let v = readCurrent(), v != 1 {
+            // 夜间防抖：固体会在睡眠唤醒/拔插充电线后把灯重置回系统色——
+            // 每 30 秒核对一次，发现漂移立即重新关灯（不依赖 helper 看门狗）
+            if writeCurrent(1) {
+                current = 1
+                rebuildMenu()
+                flash(title: "夜间模式：灯被系统重置，已重新关闭")
+            }
         }
     }
 }

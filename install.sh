@@ -22,16 +22,32 @@ if [ -z "$HELPER" ]; then
 fi
 
 INSTALL_DIR=/usr/local/lib/magled
+
+# 2) 幂等：守护已在运行、且二进制没有更新 → 跳过
+#    （避免重复安装重启守护、让用户反复输密码；二进制有更新时才重装）
+if [ -S /var/run/magled.sock ] && pgrep -f "$INSTALL_DIR/magled-helper" >/dev/null 2>&1; then
+    if [ "$(md5 -q "$HELPER" 2>/dev/null || echo x)" = "$(md5 -q "$INSTALL_DIR/magled-helper" 2>/dev/null || echo y)" ]; then
+        echo "✅ magled 后台守护已安装且在运行，无需重复安装。"
+        exit 0
+    fi
+    echo "ℹ️ 检测到守护二进制已更新，重新安装…"
+fi
+
+# 2) 先停旧守护再拷贝——避免覆盖正在被执行的二进制
+launchctl bootout system/com.atstudio.magled 2>/dev/null || true
+pkill -f "$INSTALL_DIR/magled-helper" 2>/dev/null || true
+for _ in 1 2 3 4 5 6; do
+    pgrep -f "$INSTALL_DIR/magled-helper" >/dev/null 2>&1 || break
+    sleep 0.5
+done
+
+# 3) 安装新二进制
 mkdir -p "$INSTALL_DIR" /var/run
 cp "$HELPER" "$INSTALL_DIR/magled-helper"
 chmod 755 "$INSTALL_DIR/magled-helper"
 codesign -f -s - "$INSTALL_DIR/magled-helper" 2>/dev/null || true
 
-# 2) 旧进程先退
-launchctl bootout system/com.atstudio.magled 2>/dev/null || true
-pkill -f "$INSTALL_DIR/magled-helper" 2>/dev/null || true
-
-# 3) launchd daemon
+# 4) launchd daemon
 PLIST=/Library/LaunchDaemons/com.atstudio.magled.plist
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

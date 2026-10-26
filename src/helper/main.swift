@@ -66,14 +66,23 @@ final class Helper {
             if sMC == nil { sMC = try SMC.Client() }
             try sMC!.writeByte(SMC.magSafeLEDKey, v)
             Thread.sleep(forTimeInterval: 0.05)
-            let back = (try? sMC!.readByte(SMC.magSafeLEDKey)) ?? 0xFF
-            if back != v {
-                log("helper: WARN write 0x\(String(v, radix: 16)) but read back 0x\(String(back, radix: 16))")
-                return false
+            if let back = (try? sMC!.readByte(SMC.magSafeLEDKey)) {
+                // macOS 27：系统模式（0x00）回读的是"当前生效颜色"（如满电绿=0x03），
+                // 不能用相等校验——读到合法值即视为生效。
+                let ok = (v == 0) ? kAllowed.contains(back) : (back == v)
+                if !ok {
+                    log("helper: WARN write 0x\(String(v, radix: 16)) but read back 0x\(String(back, radix: 16))")
+                    return false
+                }
+            } else {
+                // 回读失败（旧版 macOS / root 读被限）：写入调用本身已成功，按成功处理
+                log("helper: WARN write 0x\(String(v, radix: 16)) — read-back unavailable, assuming success")
             }
             return true
         } catch {
             log("helper: write 0x\(String(v, radix: 16)) failed: \(error)")
+            // 连接失效则丢弃，下次自动重连
+            sMC = nil
             return false
         }
     }
@@ -102,6 +111,10 @@ final class Helper {
         let cfd = accept(fd, withUnsafeMutablePointer(to: &peerAddr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 } }, &len)
         guard cfd >= 0 else { return }
         defer { close(cfd) }
+
+        // 读超时 5 秒：防止客户端连上却不发数据把单线程守护挂死
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var buffer = [UInt8](repeating: 0, count: 256)
         var line = [UInt8]()
@@ -133,7 +146,10 @@ final class Helper {
             sMC = c
         }
         guard let c = sMC else { return nil }
-        return try? c.readByte(SMC.magSafeLEDKey)
+        if let v = try? c.readByte(SMC.magSafeLEDKey) { return v }
+        // 读取失败：连接可能已失效（睡眠唤醒后常见）——丢弃，下次自动重连
+        sMC = nil
+        return nil
     }
 
     func dispatch(_ request: String) -> String {
@@ -150,9 +166,13 @@ final class Helper {
         case "set":
             guard parts.count > 1, let v = UInt8(parts[1], radix: 16) else { return "ERR bad-value" }
             guard kAllowed.contains(v) else { return "ERR disallowed" }
-            persisted = v
-            savePersisted(v)
-            return apply(v, force: true) ? String(format: "OK %02x", v) : "ERR write-failed"
+            let ok = apply(v, force: true)
+            // 只有写入成功才持久化：避免失败时状态文件与实际灯态不一致（重启后坚持一个没生效的模式）
+            if ok {
+                persisted = v
+                savePersisted(v)
+            }
+            return ok ? String(format: "OK %02x", v) : "ERR write-failed"
         default:
             return "ERR unknown-command"
         }
@@ -160,8 +180,9 @@ final class Helper {
 
     func watchdogTick() {
         guard persisted != 0 else { return }
+        // 用 currentLED() 而非裸 readByte：连接失效时它会重连，避免看门狗静默失效
         if SMC.isLEDKeySupported(),
-           let cur = try? sMC?.readByte(SMC.magSafeLEDKey),
+           let cur = currentLED(),
            cur != persisted {
             log("helper: watchdog — LED state drifted to 0x\(String(cur, radix: 16)), re-asserting 0x\(String(persisted, radix: 16))")
             _ = apply(persisted, force: true)
@@ -210,8 +231,8 @@ while !stopFlag {
             }
         }
     }
-    // allow signal handler to interrupt select
-    usleep(1_000_000)
+    // allow signal handler to interrupt select（信号本身会中断 select，这里只做极少让退）
+    usleep(50_000)
 }
 
 log("helper: shutting down")

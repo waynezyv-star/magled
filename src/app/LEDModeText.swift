@@ -11,6 +11,9 @@ enum LEDModeText {
         case 0x06: return "慢速闪烁"
         case 0x07: return "快速闪烁"
         case 0x19: return "闪烁后关闭"
+        // macOS 27+ 固件会把 ACLC 读回沙箱化为 0xff（且拒绝第三方写入），
+        // 此时灯必然处于系统控制下——按"跟随系统"展示。
+        case 0xff: return "跟随系统"
         default: return "未知 0x\(String(format: "%02x", v))"
         }
     }

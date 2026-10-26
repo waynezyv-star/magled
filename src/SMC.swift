@@ -141,13 +141,16 @@ public enum SMC {
             return (reply.keyInfo.dataSize, type)
         }
 
-        public func readByte(_ key: String) throws -> UInt8 {
-            var request = SMCParamStruct()
-            request.key = try fourCC(key)
-            request.data8 = kSMCReadKey
-            let reply = try call(request)
-            return reply.bytes.0
-        }
+    public func readByte(_ key: String) throws -> UInt8 {
+        var request = SMCParamStruct()
+        request.key = try fourCC(key)
+        request.data8 = kSMCReadKey
+        // 必须显式设置 dataSize：macOS 27 上不设置会读到 0xff 桩值（或直接报错），
+        // 导致回读校验误判"写入无效"。readRaw 一直设置该字段所以读取正常。
+        request.keyInfo.dataSize = 1
+        let reply = try call(request)
+        return reply.bytes.0
+    }
 
         /// Reads raw key bytes (READ-ONLY). Returns up to `count` bytes (max 32).
         public func readRaw(_ key: String, _ count: Int) throws -> Data {

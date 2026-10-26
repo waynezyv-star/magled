@@ -59,10 +59,9 @@ if mode == "default" {
     if SMC.isLEDKeySupported() {
         let v = (try? client.readByte(SMC.magSafeLEDKey)) ?? 0xFF
         print("ACLC EXISTS on this machine. Current value: 0x" + String(format: "%02x", v))
-        print("Note: this is a Mac Studio (no MagSafe 3 port) — value here is informational only.")
+        print("Note: 本机 \(Fw.hostMachine())；0x00=系统控制 0x01=关 0x03=绿 0x04=橙 0x06/0x07=慢/快闪 0x19=闪后关；0xff=未插线/参考值。")
     } else {
-        print("ACLC key NOT present on this machine (Mac Studio, no MagSafe 3 hardware).")
-        print("The M2 Max MacBook Pro target should have it. Probe must be re-run there.")
+        print("ACLC key NOT present on this machine (\(Fw.hostMachine())) — 无 MagSafe 3 硬件，本工具不适用。")
     }
 
 } else if mode == "keys" {

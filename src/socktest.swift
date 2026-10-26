@@ -22,7 +22,6 @@ let r = withUnsafePointer(to: &addr) { p in
 if r != 0 { print("connect() errno \(errno): \(String(cString: strerror(errno)))"); exit(1) }
 print("connected")
 let req = Array("ping\n".utf8)
-req.withUnsafeBytes { _ in }
 _ = req.withUnsafeBytes { buf in Darwin.write(fd, buf.baseAddress, buf.count) }
 var buf = [UInt8](repeating: 0, count: 256)
 let n = buf.withUnsafeMutableBytes { p -> Int in Darwin.read(fd, p.baseAddress, 256) }
