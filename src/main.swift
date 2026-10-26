@@ -8,7 +8,7 @@ import Darwin
 //   ./probe keys       SMC 全键枚举（#KEY/KKEY 索引法，含 1 字节键当前值）
 //   ./probe fw         固件/身份探测：IOKit 全注册表扫描 + SMC 线缆/端口相关键
 //
-// 在 M2 Max MacBook Pro 上插上 MagSafe 3 线缆（最好接充电器）运行:
+// 在带 MagSafe 3 接口的机器上插好线缆（最好接充电器）运行:
 //   ./probe fw   > ~/Desktop/magled_fw.txt
 //   ./probe keys >> ~/Desktop/magled_fw.txt
 // 把 magled_fw.txt 发回，用于把固件读取对准真实键名。
@@ -132,8 +132,7 @@ if mode == "default" {
     } catch {
         print("key enumeration failed: \(error)")
     }
-    print("\nNOTE: if this ran on the Mac Studio, most of the above is empty by design")
-    print("      (no MagSafe 3 hardware). Re-run on the M2 Max MacBook Pro.")
+    print("\nNOTE: 无 MagSafe 3 硬件的机器上，以上多为空属正常；请在带 MagSafe 3 的机器上重跑。")
 
 } else {
     print("unknown mode '\(mode)' — usage: probe | probe keys | probe fw")

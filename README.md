@@ -115,7 +115,7 @@ sudo sh uninstall.sh   # 或 菜单 → 卸载后台守护
 
 ```bash
 xcode-select --install        # 如未安装
-git clone https://github.com/<你的用户名>/magled.git
+git clone https://github.com/zjhenrynsyh/magled.git
 cd magled
 ./build.sh
 ```

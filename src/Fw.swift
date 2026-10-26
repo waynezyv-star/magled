@@ -1,10 +1,9 @@
 // Fw.swift — MagSafe 3 cable / port firmware & identity discovery (READ-ONLY).
 //
 // Shared by the probe tool, ledctl (subcommands "probe"/"fw") and the MagLED app.
-// Development machine (M5 Studio) has no MagSafe 3; run on the M2 Max
-// MacBook Pro to see the real cable values.
+// 无 MagSafe 3 硬件的机器上多数字段为空属正常；请在带 MagSafe 3 的机器上查看真实线缆值。
 //
-// 用法（在 M2 Max MacBook Pro 上，插好 MagSafe 3 线）：
+// 用法（在带 MagSafe 3 接口的机器上，插好线缆）：
 //   ./probe fw        → IOKit 注册表穷举 + SMC 线缆/端口相关键（含原始字节）
 //   ./probe keys      → SMC 全键表（#KEY/KKEY 索引法，只读）
 // 把输出发回即可把固件读取对准真实键名。
